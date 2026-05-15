@@ -1,4 +1,4 @@
-import { Container, Graphics, Text, TextStyle, type Application } from 'pixi.js'
+import { Assets, Container, Graphics, Sprite, Text, TextStyle, Texture, type Application } from 'pixi.js'
 import type { HeliosDeviceState, TileReceiver } from '../../store/heliosStore'
 
 const GROUP_COLORS = [
@@ -16,21 +16,38 @@ const SECTION_GAP = 40
 const LABEL_HEIGHT = 26
 const TILE_GAP = 2
 
+interface TileLayout {
+  offsetX: number
+  offsetY: number
+  renderedW: number
+  renderedH: number
+  scale: number
+}
+
 class ProcessorSection {
-  container = new Container()
+  readonly container = new Container()
+  private bgLayer = new Container()
+  private tileLayer = new Container()
   private nameLabel: Text
   private statusLabel: Text
   private selectionOutline: Graphics
-  private tileGraphics = new Map<string, Graphics>()
-  private isSelected = false
 
-  constructor(public readonly ip: string, private onSelect: (ip: string) => void) {
-    this.container.interactive = true
-    this.container.cursor = 'pointer'
-    this.container.on('pointerdown', (e) => {
-      e.stopPropagation()
-      onSelect(ip)
-    })
+  private tileGraphics = new Map<string, Graphics>()
+  private previewSprite: Sprite | null = null
+  private currentPreviewUrl: string | null = null
+  private lastLayout: TileLayout | null = null
+
+  private isSelected = false
+  private selectedTileId: string | null = null
+
+  constructor(
+    public readonly ip: string,
+    private onSelectProcessor: (ip: string) => void,
+    private onSelectTile: (ip: string, tileId: string) => void
+  ) {
+    // Layer order: bg → tiles → labels → outline
+    this.container.addChild(this.bgLayer)
+    this.container.addChild(this.tileLayer)
 
     const labelStyle = new TextStyle({
       fill: 0x9999aa,
@@ -38,7 +55,6 @@ class ProcessorSection {
       fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif',
       fontWeight: '500'
     })
-
     this.nameLabel = new Text({ text: ip, style: labelStyle })
     this.container.addChild(this.nameLabel)
 
@@ -52,19 +68,25 @@ class ProcessorSection {
 
     this.selectionOutline = new Graphics()
     this.container.addChild(this.selectionOutline)
+
+    // Click on section background selects processor, clears tile
+    this.container.interactive = true
+    this.container.cursor = 'pointer'
+    this.container.on('pointerdown', (e) => {
+      e.stopPropagation()
+      onSelectProcessor(ip)
+    })
   }
 
   update(state: HeliosDeviceState, sectionW: number, sectionH: number): void {
     const name = state.receivers[0]?.info?.name ?? this.ip
-    const displayName = name.length > 22 ? name.slice(0, 20) + '…' : name
-    this.nameLabel.text = displayName
+    this.nameLabel.text = name.length > 22 ? name.slice(0, 20) + '…' : name
 
-    const status = state.loading
+    this.statusLabel.text = state.loading
       ? 'Connecting…'
       : state.error
         ? `Error: ${state.error.slice(0, 20)}`
         : `${state.receivers.length} tiles`
-    this.statusLabel.text = status
 
     this.renderTiles(state.receivers, sectionW, sectionH)
     this.updateOutline(sectionW, sectionH)
@@ -73,10 +95,9 @@ class ProcessorSection {
 
   private renderTiles(receivers: TileReceiver[], sectionW: number, sectionH: number): void {
     const currentIds = new Set(receivers.map((r) => r.id))
-
     for (const [id, gfx] of this.tileGraphics) {
       if (!currentIds.has(id)) {
-        this.container.removeChild(gfx)
+        this.tileLayer.removeChild(gfx)
         gfx.destroy()
         this.tileGraphics.delete(id)
       }
@@ -94,34 +115,56 @@ class ProcessorSection {
     const offsetX = (sectionW - renderedW) / 2
     const offsetY = LABEL_HEIGHT + (usableH - renderedH) / 2
 
+    this.lastLayout = { offsetX, offsetY, renderedW, renderedH, scale }
+    this.updatePreviewPosition()
+
     for (const r of receivers) {
       let gfx = this.tileGraphics.get(r.id)
       if (!gfx) {
         gfx = new Graphics()
         gfx.interactive = true
         gfx.cursor = 'pointer'
+        const tileId = r.id
         gfx.on('pointerdown', (e) => {
           e.stopPropagation()
-          this.onSelect(this.ip)
+          this.onSelectTile(this.ip, tileId)
         })
-        this.container.addChildAt(gfx, 1)
+        this.tileLayer.addChild(gfx)
         this.tileGraphics.set(r.id, gfx)
       }
 
+      const isTileSelected = r.id === this.selectedTileId
       const groupIdx = Math.max(0, r.groupId)
       const color = GROUP_COLORS[groupIdx % GROUP_COLORS.length]
-      const alpha = this.isSelected ? 0.9 : 0.72
 
       const x = offsetX + r.x * scale + TILE_GAP / 2
       const y = offsetY + r.y * scale + TILE_GAP / 2
       const w = Math.max(1, r.width * scale - TILE_GAP)
       const h = Math.max(1, r.height * scale - TILE_GAP)
 
-      gfx
-        .clear()
-        .rect(x, y, w, h)
-        .fill({ color, alpha })
-        .stroke({ color: 0xffffff, alpha: 0.1, width: 1 })
+      if (isTileSelected) {
+        // Selected tile: bright fill + thick white outline
+        gfx
+          .clear()
+          .rect(x, y, w, h)
+          .fill({ color, alpha: 1.0 })
+          .stroke({ color: 0xffffff, alpha: 0.9, width: 2 })
+      } else if (this.previewSprite) {
+        // Preview mode: tile as semi-transparent outline only
+        gfx
+          .clear()
+          .rect(x, y, w, h)
+          .fill({ color, alpha: 0.25 })
+          .stroke({ color, alpha: 0.7, width: 1 })
+      } else {
+        // Normal mode: solid fill
+        const alpha = this.isSelected ? 0.9 : 0.72
+        gfx
+          .clear()
+          .rect(x, y, w, h)
+          .fill({ color, alpha })
+          .stroke({ color: 0xffffff, alpha: 0.1, width: 1 })
+      }
     }
   }
 
@@ -141,14 +184,76 @@ class ProcessorSection {
     this.statusLabel.y = 15
   }
 
+  private updatePreviewPosition(): void {
+    if (!this.previewSprite || !this.lastLayout) return
+    const { offsetX, offsetY, renderedW, renderedH } = this.lastLayout
+    this.previewSprite.x = offsetX
+    this.previewSprite.y = offsetY
+    this.previewSprite.width = renderedW
+    this.previewSprite.height = renderedH
+  }
+
+  async updatePreview(url: string | null): Promise<void> {
+    const oldUrl = this.currentPreviewUrl
+    if (url === oldUrl) return
+
+    if (!url) {
+      if (this.previewSprite) {
+        this.bgLayer.removeChild(this.previewSprite)
+        this.previewSprite.destroy(false)
+        this.previewSprite = null
+      }
+      this.currentPreviewUrl = null
+      if (oldUrl) {
+        Assets.unload(oldUrl).catch(() => {})
+        if (oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl)
+      }
+      return
+    }
+
+    this.currentPreviewUrl = url
+
+    try {
+      const texture: Texture = await Assets.load(url)
+
+      if (!this.previewSprite) {
+        this.previewSprite = new Sprite(texture)
+        this.previewSprite.alpha = 0.7
+        this.bgLayer.addChild(this.previewSprite)
+      } else {
+        this.previewSprite.texture = texture
+      }
+
+      this.updatePreviewPosition()
+
+      if (oldUrl) {
+        Assets.unload(oldUrl).catch(() => {})
+        if (oldUrl.startsWith('blob:')) URL.revokeObjectURL(oldUrl)
+      }
+    } catch {
+      this.currentPreviewUrl = null
+      if (url.startsWith('blob:')) URL.revokeObjectURL(url)
+    }
+  }
+
   setSelected(selected: boolean): void {
     this.isSelected = selected
     this.container.alpha = selected ? 1.0 : 0.8
   }
 
+  setSelectedTile(tileId: string | null): void {
+    this.selectedTileId = tileId
+  }
+
   destroy(): void {
     this.tileGraphics.forEach((g) => g.destroy())
     this.tileGraphics.clear()
+    if (this.previewSprite) {
+      if (this.currentPreviewUrl) {
+        Assets.unload(this.currentPreviewUrl).catch(() => {})
+        if (this.currentPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(this.currentPreviewUrl)
+      }
+    }
     this.container.destroy({ children: true })
   }
 }
@@ -158,9 +263,15 @@ export class MultiProcessorScene {
   private sections = new Map<string, ProcessorSection>()
   private lastStates: Record<string, HeliosDeviceState> = {}
   private readonly onSelectProcessor: (ip: string | null) => void
+  private readonly onSelectTile: (ip: string, tileId: string) => void
 
-  constructor(private readonly app: Application, onSelectProcessor: (ip: string | null) => void) {
+  constructor(
+    private readonly app: Application,
+    onSelectProcessor: (ip: string | null) => void,
+    onSelectTile: (ip: string, tileId: string) => void
+  ) {
     this.onSelectProcessor = onSelectProcessor
+    this.onSelectTile = onSelectTile
 
     this.container.interactive = true
     this.container.on('pointerdown', () => onSelectProcessor(null))
@@ -182,13 +293,32 @@ export class MultiProcessorScene {
 
     for (const ip of ips) {
       if (!this.sections.has(ip)) {
-        const section = new ProcessorSection(ip, (sectionIp) => this.onSelectProcessor(sectionIp))
+        const section = new ProcessorSection(
+          ip,
+          (sectionIp) => this.onSelectProcessor(sectionIp),
+          (sectionIp, tileId) => this.onSelectTile(sectionIp, tileId)
+        )
         this.sections.set(ip, section)
         this.container.addChild(section.container)
       }
     }
 
     this.layout(deviceStates)
+  }
+
+  updatePreviews(urls: Record<string, string | null>): void {
+    for (const [ip, section] of this.sections) {
+      const url = urls[ip] ?? null
+      section.updatePreview(url).catch(console.error)
+    }
+  }
+
+  updateSelection(ip: string | null, tileId: string | null): void {
+    for (const [sectionIp, section] of this.sections) {
+      section.setSelected(sectionIp === ip)
+      section.setSelectedTile(sectionIp === ip ? tileId : null)
+    }
+    this.layout(this.lastStates)
   }
 
   private layout(deviceStates: Record<string, HeliosDeviceState>): void {
@@ -214,11 +344,8 @@ export class MultiProcessorScene {
     })
   }
 
+  // Legacy compat — used by older effect in HeliosCanvas
   setSelected(ip: string | null): void {
-    for (const [sectionIp, section] of this.sections) {
-      section.setSelected(sectionIp === ip)
-    }
-    // Re-draw outlines
-    this.layout(this.lastStates)
+    this.updateSelection(ip, null)
   }
 }

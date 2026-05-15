@@ -35,6 +35,7 @@ export interface InputState {
 
 export interface GroupState {
   id: number
+  key: string
   name: string
   blackout: boolean
   gains: { r: number; g: number; b: number; i: number }
@@ -90,6 +91,7 @@ interface HeliosStoreState {
   credentials: Record<string, Credentials>
   permissions: Record<string, 'read' | 'write'>
   selectedProcessorIp: string | null
+  selectedTileId: string | null
 
   initDevice: (ip: string) => void
   setDeviceState: (ip: string, state: Partial<HeliosDeviceState>) => void
@@ -97,9 +99,12 @@ interface HeliosStoreState {
   updateInput: (ip: string, input: Partial<InputState>) => void
   updateReceivers: (ip: string, receivers: TileReceiver[]) => void
   updateGroups: (ip: string, groups: GroupState[]) => void
+  updateGroup: (ip: string, groupKey: string, patch: Partial<GroupState>) => void
+  updateReceiver: (ip: string, receiverId: string, patch: Partial<TileReceiver>) => void
   setError: (ip: string, error: string | null) => void
   setLoading: (ip: string, loading: boolean) => void
   selectProcessor: (ip: string | null) => void
+  selectTile: (tileId: string | null) => void
   setCredentials: (ip: string, creds: Credentials) => void
   setPermission: (ip: string, permission: 'read' | 'write') => void
   getPermission: (ip: string) => 'read' | 'write'
@@ -111,6 +116,7 @@ export const useHeliosStore = create<HeliosStoreState>((set, get) => ({
   credentials: {},
   permissions: {},
   selectedProcessorIp: null,
+  selectedTileId: null,
 
   initDevice: (ip) =>
     set((state) => ({
@@ -166,6 +172,34 @@ export const useHeliosStore = create<HeliosStoreState>((set, get) => ({
       }
     })),
 
+  updateGroup: (ip, groupKey, patch) =>
+    set((state) => {
+      const cur = state.deviceStates[ip] ?? defaultDeviceState()
+      return {
+        deviceStates: {
+          ...state.deviceStates,
+          [ip]: {
+            ...cur,
+            groups: cur.groups.map((g) => (g.key === groupKey ? { ...g, ...patch } : g))
+          }
+        }
+      }
+    }),
+
+  updateReceiver: (ip, receiverId, patch) =>
+    set((state) => {
+      const cur = state.deviceStates[ip] ?? defaultDeviceState()
+      return {
+        deviceStates: {
+          ...state.deviceStates,
+          [ip]: {
+            ...cur,
+            receivers: cur.receivers.map((r) => (r.id === receiverId ? { ...r, ...patch } : r))
+          }
+        }
+      }
+    }),
+
   setError: (ip, error) =>
     set((state) => ({
       deviceStates: {
@@ -182,7 +216,9 @@ export const useHeliosStore = create<HeliosStoreState>((set, get) => ({
       }
     })),
 
-  selectProcessor: (ip) => set({ selectedProcessorIp: ip }),
+  selectProcessor: (ip) => set({ selectedProcessorIp: ip, selectedTileId: null }),
+
+  selectTile: (tileId) => set({ selectedTileId: tileId }),
 
   setCredentials: (ip, creds) =>
     set((state) => ({ credentials: { ...state.credentials, [ip]: creds } })),
@@ -193,5 +229,5 @@ export const useHeliosStore = create<HeliosStoreState>((set, get) => ({
   getPermission: (ip) => get().permissions[ip] ?? 'write',
 
   clearAll: () =>
-    set({ deviceStates: {}, permissions: {}, selectedProcessorIp: null }),
+    set({ deviceStates: {}, permissions: {}, selectedProcessorIp: null, selectedTileId: null }),
 }))

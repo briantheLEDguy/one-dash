@@ -1,19 +1,31 @@
 import React, { useState, useRef, useEffect } from 'react'
 import {
   X, Lock, Eye, Wifi, WifiOff,
-  AlertTriangle, CheckCircle, Camera
+  AlertTriangle, CheckCircle, Camera, Plus, Trash2, Pencil, Check
 } from 'lucide-react'
 import type { NavId } from './Sidebar'
-import { useHeliosStore, type Credentials, type GroupState, type HeliosDeviceState } from '../store/heliosStore'
+import {
+  useHeliosStore,
+  type Credentials,
+  type GroupState,
+  type TileReceiver,
+  type HeliosDeviceState
+} from '../store/heliosStore'
 import { useDeviceStore } from '../store/deviceStore'
-import { patchDisplay, patchInput, patchGroup } from '../api/heliosRest'
+import {
+  patchDisplay, patchInput, patchGroup, patchReceiver,
+  createGroup, deleteGroup, getAll
+} from '../api/heliosRest'
 
 // ─── Shared micro-components ─────────────────────────────────────────────────
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+function SectionLabel({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div style={{ color: 'var(--color-helios-muted)', fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', marginBottom: 6, marginTop: 4, textTransform: 'uppercase' }}>
-      {children}
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6, marginTop: 4 }}>
+      <div style={{ color: 'var(--color-helios-muted)', fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase' }}>
+        {children}
+      </div>
+      {action}
     </div>
   )
 }
@@ -119,29 +131,265 @@ function EmptyState({ children }: { children: React.ReactNode }) {
   )
 }
 
-function IconBtn({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title?: string }) {
+function IconBtn({ children, onClick, title, danger }: { children: React.ReactNode; onClick: () => void; title?: string; danger?: boolean }) {
   return (
     <button
       onClick={onClick} title={title}
-      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--color-helios-muted)', padding: 5, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-      onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--color-helios-text)')}
-      onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.color = 'var(--color-helios-muted)')}
+      style={{ background: 'none', border: 'none', cursor: 'pointer', color: danger ? '#ff6464' : 'var(--color-helios-muted)', padding: 4, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+      onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.color = danger ? '#ff9090' : 'var(--color-helios-text)')}
+      onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.color = danger ? '#ff6464' : 'var(--color-helios-muted)')}
     >
       {children}
     </button>
   )
 }
 
-// ─── Mapping: Groups & layout overview ───────────────────────────────────────
+const selectStyle: React.CSSProperties = {
+  width: '100%', padding: '5px 8px',
+  background: 'var(--color-helios-bg)',
+  border: '1px solid var(--color-helios-border)',
+  borderRadius: 4, color: 'var(--color-helios-text)', fontSize: 12
+}
 
-function MappingSection({ state, ip, creds }: { state: HeliosDeviceState; ip: string; creds: Credentials | undefined }) {
+const numInputStyle: React.CSSProperties = {
+  width: 60, padding: '4px 6px',
+  background: 'var(--color-helios-bg)',
+  border: '1px solid var(--color-helios-border)',
+  borderRadius: 4, color: 'var(--color-helios-text)', fontSize: 12
+}
+
+// ─── Selected Tile Panel ──────────────────────────────────────────────────────
+
+function TilePanel({
+  tile, groups, ip, creds
+}: {
+  tile: TileReceiver; groups: GroupState[]; ip: string; creds: Credentials | undefined
+}) {
+  const updateReceiver = useHeliosStore((s) => s.updateReceiver)
+  const [draftX, setDraftX] = useState(tile.x)
+  const [draftY, setDraftY] = useState(tile.y)
+
+  useEffect(() => { setDraftX(tile.x) }, [tile.x])
+  useEffect(() => { setDraftY(tile.y) }, [tile.y])
+
+  async function commitPosition(field: 'x' | 'y', value: number) {
+    try {
+      await patchReceiver(ip, creds, tile.id, { [field]: value })
+      updateReceiver(ip, tile.id, { [field]: value })
+    } catch (e) { console.error('Receiver patch failed:', e) }
+  }
+
+  async function changeGroup(groupId: number) {
+    try {
+      await patchReceiver(ip, creds, tile.id, { groupId })
+      updateReceiver(ip, tile.id, { groupId })
+    } catch (e) { console.error('Receiver patch failed:', e) }
+  }
+
+  const statusColor = tile.info?.connected === false ? '#ff6464' : tile.info?.connected ? '#48c878' : 'var(--color-helios-muted)'
+
+  return (
+    <div style={{ marginBottom: 14, padding: '10px', borderRadius: 6, border: '1px solid var(--color-helios-accent)', background: 'rgba(255,107,53,0.06)' }}>
+      <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--color-helios-text)', marginBottom: 6 }}>
+        {tile.info?.name || tile.id}
+      </div>
+
+      {tile.info?.pixelsW != null && (
+        <InfoRow label="Pixels" value={`${tile.info.pixelsW} × ${tile.info.pixelsH}`} />
+      )}
+      <InfoRow label="Canvas size" value={`${tile.width} × ${tile.height}`} />
+      {tile.info?.connected != null && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid var(--color-helios-border)' }}>
+          <span style={{ color: 'var(--color-helios-muted)', fontSize: 12 }}>Status</span>
+          <span style={{ color: statusColor, fontSize: 12, fontWeight: 600 }}>
+            {tile.info.connected ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
+      )}
+
+      <div style={{ marginTop: 8, marginBottom: 6 }}>
+        <div style={{ color: 'var(--color-helios-muted)', fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 6 }}>Position</div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <label style={{ color: 'var(--color-helios-muted)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
+            X
+            <input
+              type="number" value={draftX} style={numInputStyle}
+              onChange={(e) => setDraftX(Number(e.target.value))}
+              onBlur={() => commitPosition('x', draftX)}
+              onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+            />
+          </label>
+          <label style={{ color: 'var(--color-helios-muted)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 }}>
+            Y
+            <input
+              type="number" value={draftY} style={numInputStyle}
+              onChange={(e) => setDraftY(Number(e.target.value))}
+              onBlur={() => commitPosition('y', draftY)}
+              onKeyDown={(e) => e.key === 'Enter' && (e.currentTarget as HTMLInputElement).blur()}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <div style={{ color: 'var(--color-helios-muted)', fontSize: 10, fontWeight: 600, letterSpacing: '0.07em', textTransform: 'uppercase', marginBottom: 4 }}>Group</div>
+        <select
+          value={tile.groupId}
+          onChange={(e) => changeGroup(Number(e.target.value))}
+          style={selectStyle}
+        >
+          <option value={-1}>— No group —</option>
+          {groups.map((g) => (
+            <option key={g.key} value={g.id}>{g.name || `Group ${g.id}`}</option>
+          ))}
+        </select>
+      </div>
+    </div>
+  )
+}
+
+// ─── Group Card ───────────────────────────────────────────────────────────────
+
+function GroupCard({
+  group, ip, creds, onDeleted
+}: {
+  group: GroupState; ip: string; creds: Credentials | undefined
+  onDeleted: (key: string) => void
+}) {
+  const updateGroup = useHeliosStore((s) => s.updateGroup)
+  const [isEditing, setIsEditing] = useState(false)
+  const [draftName, setDraftName] = useState(group.name)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => { setDraftName(group.name) }, [group.name])
+
+  useEffect(() => {
+    if (isEditing) nameInputRef.current?.focus()
+  }, [isEditing])
+
   async function tryPatch(fn: () => Promise<void>) {
     try { await fn() } catch (e) { console.error('Patch failed:', e) }
   }
 
+  async function commitName() {
+    setIsEditing(false)
+    const trimmed = draftName.trim()
+    if (trimmed === group.name) return
+    await tryPatch(async () => {
+      await patchGroup(ip, creds, group.key, { name: trimmed })
+      updateGroup(ip, group.key, { name: trimmed })
+    })
+  }
+
+  async function handleDelete() {
+    if (!confirmDelete) { setConfirmDelete(true); return }
+    try {
+      await deleteGroup(ip, creds, group.key)
+      onDeleted(group.key)
+    } catch (e) { console.error('Delete failed:', e) }
+    setConfirmDelete(false)
+  }
+
+  return (
+    <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: '1px solid var(--color-helios-border)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        {isEditing ? (
+          <input
+            ref={nameInputRef}
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') { setDraftName(group.name); setIsEditing(false) } }}
+            style={{ ...numInputStyle, width: '100%', marginRight: 4 }}
+          />
+        ) : (
+          <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--color-helios-text)', flex: 1, cursor: 'pointer' }} onClick={() => setIsEditing(true)}>
+            {group.name || `Group ${group.id}`}
+          </span>
+        )}
+        <div style={{ display: 'flex', gap: 0 }}>
+          {isEditing ? (
+            <IconBtn onClick={commitName} title="Save name"><Check size={13} /></IconBtn>
+          ) : (
+            <IconBtn onClick={() => setIsEditing(true)} title="Rename"><Pencil size={12} /></IconBtn>
+          )}
+          <IconBtn
+            onClick={handleDelete}
+            title={confirmDelete ? 'Click again to confirm delete' : 'Delete group'}
+            danger
+          >
+            <Trash2 size={12} />
+          </IconBtn>
+        </div>
+      </div>
+      {confirmDelete && (
+        <div style={{ fontSize: 11, color: '#ff6464', marginBottom: 6 }}>
+          Click delete again to confirm
+        </div>
+      )}
+      <ToggleRow
+        label="Blackout"
+        value={group.blackout}
+        onChange={(v) => tryPatch(async () => {
+          await patchGroup(ip, creds, group.key, { blackout: v })
+          updateGroup(ip, group.key, { blackout: v })
+        })}
+      />
+      <SliderRow label="Red" value={Math.round(group.gains.r * 100)} min={0} max={100} unit="%"
+        onChange={(v) => tryPatch(async () => {
+          const gains = { ...group.gains, r: v / 100 }
+          await patchGroup(ip, creds, group.key, { gains })
+          updateGroup(ip, group.key, { gains })
+        })} />
+      <SliderRow label="Green" value={Math.round(group.gains.g * 100)} min={0} max={100} unit="%"
+        onChange={(v) => tryPatch(async () => {
+          const gains = { ...group.gains, g: v / 100 }
+          await patchGroup(ip, creds, group.key, { gains })
+          updateGroup(ip, group.key, { gains })
+        })} />
+      <SliderRow label="Blue" value={Math.round(group.gains.b * 100)} min={0} max={100} unit="%"
+        onChange={(v) => tryPatch(async () => {
+          const gains = { ...group.gains, b: v / 100 }
+          await patchGroup(ip, creds, group.key, { gains })
+          updateGroup(ip, group.key, { gains })
+        })} />
+      <SliderRow label="Intensity" value={Math.round(group.gains.i * 100)} min={0} max={100} unit="%"
+        onChange={(v) => tryPatch(async () => {
+          const gains = { ...group.gains, i: v / 100 }
+          await patchGroup(ip, creds, group.key, { gains })
+          updateGroup(ip, group.key, { gains })
+        })} />
+    </div>
+  )
+}
+
+// ─── Mapping: Groups & layout overview ───────────────────────────────────────
+
+function MappingSection({ state, ip, creds }: { state: HeliosDeviceState; ip: string; creds: Credentials | undefined }) {
+  const selectedTileId = useHeliosStore((s) => s.selectedTileId)
+  const setDeviceState = useHeliosStore((s) => s.setDeviceState)
+
   const recs = state.receivers
   const canvasW = recs.length > 0 ? Math.max(...recs.map((r) => r.x + r.width)) - Math.min(...recs.map((r) => r.x)) : 0
   const canvasH = recs.length > 0 ? Math.max(...recs.map((r) => r.y + r.height)) - Math.min(...recs.map((r) => r.y)) : 0
+
+  const selectedTile = selectedTileId ? recs.find((r) => r.id === selectedTileId) ?? null : null
+
+  async function handleCreateGroup() {
+    try {
+      await createGroup(ip, creds, 'New Group', state.groups.map((g) => g.key))
+      const fresh = await getAll(ip, creds)
+      setDeviceState(ip, { groups: fresh.groups, receivers: fresh.receivers })
+    } catch (e) { console.error('Create group failed:', e) }
+  }
+
+  async function handleGroupDeleted() {
+    try {
+      const fresh = await getAll(ip, creds)
+      setDeviceState(ip, { groups: fresh.groups, receivers: fresh.receivers })
+    } catch (e) { console.error('Refresh after delete failed:', e) }
+  }
 
   return (
     <>
@@ -152,66 +400,90 @@ function MappingSection({ state, ip, creds }: { state: HeliosDeviceState; ip: st
         <Stat label="W×H" value={recs.length > 0 ? `${canvasW}×${canvasH}` : '—'} />
       </div>
 
-      {state.groups.length === 0 && (
-        <div style={{ color: 'var(--color-helios-muted)', fontSize: 12, fontStyle: 'italic' }}>No groups configured</div>
+      {selectedTile && (
+        <>
+          <SectionLabel>Selected Tile</SectionLabel>
+          <TilePanel tile={selectedTile} groups={state.groups} ip={ip} creds={creds} />
+        </>
       )}
 
-      {state.groups.map((group, idx) => (
-        <GroupCard key={group.id} group={group} idx={idx} ip={ip} creds={creds} tryPatch={tryPatch} />
+      <SectionLabel
+        action={
+          <button
+            onClick={handleCreateGroup}
+            style={{ display: 'flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 4, border: '1px solid var(--color-helios-border)', background: 'var(--color-helios-bg)', color: 'var(--color-helios-muted)', fontSize: 10, cursor: 'pointer', fontWeight: 600 }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--color-helios-text)')}
+            onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--color-helios-muted)')}
+          >
+            <Plus size={11} /> Group
+          </button>
+        }
+      >
+        Groups
+      </SectionLabel>
+
+      {state.groups.length === 0 && (
+        <div style={{ color: 'var(--color-helios-muted)', fontSize: 12, fontStyle: 'italic', marginBottom: 8 }}>
+          No groups — click + Group to create one
+        </div>
+      )}
+
+      {state.groups.map((group) => (
+        <GroupCard
+          key={group.key}
+          group={group}
+          ip={ip}
+          creds={creds}
+          onDeleted={handleGroupDeleted}
+        />
       ))}
     </>
   )
 }
 
-function GroupCard({
-  group, idx, ip, creds, tryPatch
-}: {
-  group: GroupState; idx: number; ip: string; creds: Credentials | undefined
-  tryPatch: (fn: () => Promise<void>) => Promise<void>
-}) {
-  return (
-    <div style={{ marginBottom: 14, paddingBottom: 12, borderBottom: '1px solid var(--color-helios-border)' }}>
-      <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--color-helios-text)', marginBottom: 8 }}>
-        {group.name || `Group ${group.id}`}
-      </div>
-      <ToggleRow
-        label="Blackout"
-        value={group.blackout}
-        onChange={(v) => tryPatch(() => patchGroup(ip, creds, idx, { blackout: v }))}
-      />
-      <SliderRow label="Red"   value={Math.round(group.gains.r * 100)} min={0} max={100} unit="%"
-        onChange={(v) => tryPatch(() => patchGroup(ip, creds, idx, { gains: { ...group.gains, r: v / 100 } }))} />
-      <SliderRow label="Green" value={Math.round(group.gains.g * 100)} min={0} max={100} unit="%"
-        onChange={(v) => tryPatch(() => patchGroup(ip, creds, idx, { gains: { ...group.gains, g: v / 100 } }))} />
-      <SliderRow label="Blue"  value={Math.round(group.gains.b * 100)} min={0} max={100} unit="%"
-        onChange={(v) => tryPatch(() => patchGroup(ip, creds, idx, { gains: { ...group.gains, b: v / 100 } }))} />
-      <SliderRow label="Intensity" value={Math.round(group.gains.i * 100)} min={0} max={100} unit="%"
-        onChange={(v) => tryPatch(() => patchGroup(ip, creds, idx, { gains: { ...group.gains, i: v / 100 } }))} />
-    </div>
-  )
-}
-
 // ─── Input ───────────────────────────────────────────────────────────────────
 
+const TEST_PATTERN_TYPES = [
+  { value: 'solid_white', label: 'Solid White' },
+  { value: 'solid_black', label: 'Solid Black' },
+  { value: 'solid_red', label: 'Solid Red' },
+  { value: 'solid_green', label: 'Solid Green' },
+  { value: 'solid_blue', label: 'Solid Blue' },
+  { value: 'gradient_h', label: 'Gradient H' },
+  { value: 'gradient_v', label: 'Gradient V' },
+  { value: 'ramp_h', label: 'Ramp H' },
+  { value: 'ramp_v', label: 'Ramp V' },
+  { value: 'checker', label: 'Checkerboard' },
+  { value: 'color_bars', label: 'Color Bars' },
+  { value: 'grid', label: 'Grid' },
+]
+
 function InputSection({ state, ip, creds }: { state: HeliosDeviceState; ip: string; creds: Credentials | undefined }) {
+  const updateInput = useHeliosStore((s) => s.updateInput)
+
   async function tryPatch(fn: () => Promise<void>) {
     try { await fn() } catch (e) { console.error('Patch failed:', e) }
   }
 
   const inputs = Object.entries(state.input.inputs)
+  const tp = state.input.testPattern
+
+  const currentType = tp.type ?? ''
+  const knownTypes = TEST_PATTERN_TYPES.map((t) => t.value)
+  const typeOptions = knownTypes.includes(currentType) || currentType === ''
+    ? TEST_PATTERN_TYPES
+    : [{ value: currentType, label: currentType }, ...TEST_PATTERN_TYPES]
 
   return (
     <>
       <SectionLabel>Active Input</SectionLabel>
       <select
         value={state.input.input}
-        onChange={(e) => tryPatch(() => patchInput(ip, creds, { input: e.target.value }))}
-        style={{
-          width: '100%', marginBottom: 16, padding: '6px 8px',
-          background: 'var(--color-helios-bg)',
-          border: '1px solid var(--color-helios-border)',
-          borderRadius: 4, color: 'var(--color-helios-text)', fontSize: 12
-        }}
+        onChange={(e) => tryPatch(async () => {
+          await patchInput(ip, creds, { input: e.target.value })
+          updateInput(ip, { input: e.target.value })
+        })}
+        style={{ ...selectStyle, marginBottom: 16 }}
       >
         {inputs.map(([key, inp]) => (
           <option key={key} value={key}>
@@ -246,15 +518,45 @@ function InputSection({ state, ip, creds }: { state: HeliosDeviceState; ip: stri
       <SectionLabel>Test Pattern</SectionLabel>
       <ToggleRow
         label="Enable"
-        value={state.input.testPattern.enabled}
-        onChange={(v) => tryPatch(() => patchInput(ip, creds, { testPattern: { ...state.input.testPattern, enabled: v } }))}
+        value={tp.enabled}
+        onChange={(v) => tryPatch(async () => {
+          await patchInput(ip, creds, { testPattern: { ...tp, enabled: v } })
+          updateInput(ip, { testPattern: { ...tp, enabled: v } })
+        })}
       />
-      {state.input.testPattern.enabled && typeof state.input.testPattern.motion === 'boolean' && (
-        <ToggleRow
-          label="Motion"
-          value={state.input.testPattern.motion!}
-          onChange={(v) => tryPatch(() => patchInput(ip, creds, { testPattern: { ...state.input.testPattern, motion: v } }))}
-        />
+
+      {tp.enabled && (
+        <>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ color: 'var(--color-helios-muted)', fontSize: 11, marginBottom: 4 }}>Pattern Type</div>
+            <select
+              value={currentType}
+              onChange={(e) => tryPatch(async () => {
+                const newTp = { ...tp, type: e.target.value }
+                await patchInput(ip, creds, { testPattern: newTp })
+                updateInput(ip, { testPattern: newTp })
+              })}
+              style={selectStyle}
+            >
+              {currentType === '' && <option value="">— Select type —</option>}
+              {typeOptions.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {typeof tp.motion === 'boolean' && (
+            <ToggleRow
+              label="Motion"
+              value={tp.motion!}
+              onChange={(v) => tryPatch(async () => {
+                const newTp = { ...tp, motion: v }
+                await patchInput(ip, creds, { testPattern: newTp })
+                updateInput(ip, { testPattern: newTp })
+              })}
+            />
+          )}
+        </>
       )}
     </>
   )
@@ -263,30 +565,35 @@ function InputSection({ state, ip, creds }: { state: HeliosDeviceState; ip: stri
 // ─── Output ──────────────────────────────────────────────────────────────────
 
 function OutputSection({ state, ip, creds }: { state: HeliosDeviceState; ip: string; creds: Credentials | undefined }) {
-  async function tryPatch(fn: () => Promise<void>) {
-    try { await fn() } catch (e) { console.error('Patch failed:', e) }
+  const updateDisplay = useHeliosStore((s) => s.updateDisplay)
+
+  async function tryPatch(patch: Parameters<typeof patchDisplay>[2]) {
+    try {
+      await patchDisplay(ip, creds, patch)
+      updateDisplay(ip, patch)
+    } catch (e) { console.error('Patch failed:', e) }
   }
 
   return (
     <>
       <SectionLabel>Brightness &amp; Color</SectionLabel>
       <SliderRow label="Brightness" value={state.display.brightness} min={0} max={100} unit="%"
-        onChange={(v) => tryPatch(() => patchDisplay(ip, creds, { brightness: v }))} />
+        onChange={(v) => tryPatch({ brightness: v })} />
       <SliderRow label="Gamma" value={state.display.gamma} min={1} max={4} step={0.1}
-        onChange={(v) => tryPatch(() => patchDisplay(ip, creds, { gamma: v }))} />
+        onChange={(v) => tryPatch({ gamma: v })} />
       <SliderRow label="Color Temp" value={state.display.cct} min={2000} max={10000} step={100} unit="K"
-        onChange={(v) => tryPatch(() => patchDisplay(ip, creds, { cct: v }))} />
+        onChange={(v) => tryPatch({ cct: v })} />
 
       <SectionLabel>Output Control</SectionLabel>
       <ToggleRow
         label="Blackout"
         value={state.display.blackout}
-        onChange={(v) => tryPatch(() => patchDisplay(ip, creds, { blackout: v }))}
+        onChange={(v) => tryPatch({ blackout: v })}
       />
       <ToggleRow
         label="Freeze"
         value={state.display.freeze}
-        onChange={(v) => tryPatch(() => patchDisplay(ip, creds, { freeze: v }))}
+        onChange={(v) => tryPatch({ freeze: v })}
       />
     </>
   )
@@ -466,7 +773,7 @@ function PreviewSection() {
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 12, color: 'var(--color-helios-muted)', textAlign: 'center', padding: '0 20px' }}>
       <Eye size={32} style={{ opacity: 0.3 }} />
       <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-        Preview mode displays the processor output signal. This feature requires direct processor access.
+        Live preview is shown directly in the canvas when connected. The background image updates every 2 seconds.
       </div>
     </div>
   )
@@ -522,7 +829,6 @@ const NAV_LABELS: Record<NavId, string> = {
   preview: 'Preview'
 }
 
-// These nav items operate on the selected processor and show "select a processor" if none chosen
 const PROCESSOR_SECTIONS = new Set<NavId>(['mapping', 'input', 'output'])
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -553,11 +859,9 @@ export default function RightPanel({ activeNav }: { activeNav: NavId }) {
     overflow: 'hidden'
   }
 
-  // Header shown for processor-specific sections when a device is selected
   const showHeader = isProcessorSection && !!selectedIp
 
   function renderContent() {
-    // Processor sections gate on device selection
     if (isProcessorSection && (!selectedIp || !state)) {
       return <EmptyState>Select a processor</EmptyState>
     }
@@ -577,7 +881,6 @@ export default function RightPanel({ activeNav }: { activeNav: NavId }) {
 
   return (
     <aside style={panelStyle}>
-      {/* Header — only for per-processor sections when a device is selected */}
       {showHeader && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderBottom: '1px solid var(--color-helios-border)', flexShrink: 0 }}>
           <div>
@@ -600,7 +903,6 @@ export default function RightPanel({ activeNav }: { activeNav: NavId }) {
         </div>
       )}
 
-      {/* Global section header (no device context) */}
       {!isProcessorSection && (
         <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--color-helios-border)', flexShrink: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--color-helios-text)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
@@ -609,7 +911,6 @@ export default function RightPanel({ activeNav }: { activeNav: NavId }) {
         </div>
       )}
 
-      {/* Content */}
       <div style={{ flex: 1, overflowY: 'auto', position: 'relative' }}>
         {isReadOnly && isProcessorSection && selectedIp && state && (
           <div style={{ position: 'absolute', inset: 0, zIndex: 5, cursor: 'not-allowed' }} title="View only — cannot change settings" />
