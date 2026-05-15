@@ -49,9 +49,10 @@ function parseState(data: unknown): FullState {
     info: (r['info'] ?? {}) as TileReceiver['info']
   }))
 
-  const groups: GroupState[] = Object.entries(groupsRaw).map(([, g]) => {
+  const groups: GroupState[] = Object.entries(groupsRaw).map(([key, g]) => {
     const gains = (g['gains'] ?? {}) as Record<string, number>
     return {
+      key,
       id: num(g['id'], 0),
       name: str(g['name'], ''),
       blackout: bool(g['blackout'], false),
@@ -125,8 +126,52 @@ export async function patchInput(
 export async function patchGroup(
   ip: string,
   creds: Credentials | undefined,
-  groupIndex: number,
-  patch: Partial<Pick<GroupState, 'blackout' | 'gains'>>
+  groupKey: string,
+  patch: Partial<Pick<GroupState, 'blackout' | 'gains' | 'name'>>
 ): Promise<void> {
-  await createClient(ip, creds).patch('/', { dev: { groups: { [groupIndex]: patch } } })
+  await createClient(ip, creds).patch('/', { dev: { groups: { [groupKey]: patch } } })
+}
+
+export async function patchReceiver(
+  ip: string,
+  creds: Credentials | undefined,
+  receiverId: string,
+  patch: Partial<Pick<TileReceiver, 'x' | 'y' | 'width' | 'height' | 'groupId'>>
+): Promise<void> {
+  await createClient(ip, creds).patch('/', { dev: { receivers: { [receiverId]: patch } } })
+}
+
+export async function createGroup(
+  ip: string,
+  creds: Credentials | undefined,
+  name: string,
+  existingKeys: string[]
+): Promise<void> {
+  const numericKeys = existingKeys.map((k) => parseInt(k, 10)).filter((n) => !isNaN(n))
+  const nextKey = numericKeys.length > 0 ? Math.max(...numericKeys) + 1 : 0
+  await createClient(ip, creds).patch('/', {
+    dev: {
+      groups: {
+        [nextKey]: { id: nextKey, name, blackout: false, gains: { r: 1, g: 1, b: 1, i: 1 } }
+      }
+    }
+  })
+}
+
+export async function deleteGroup(
+  ip: string,
+  creds: Credentials | undefined,
+  groupKey: string
+): Promise<void> {
+  await createClient(ip, creds).patch('/', { dev: { groups: { [groupKey]: null } } })
+}
+
+export async function fetchPreviewBlob(ip: string, creds?: Credentials): Promise<string> {
+  const client = axios.create({
+    baseURL: `http://${ip}/api/v1/public`,
+    timeout: 5000,
+    ...(creds ? { auth: { username: creds.username, password: creds.password } } : {})
+  })
+  const { data } = await client.get<Blob>('/preview', { responseType: 'blob' })
+  return URL.createObjectURL(data)
 }
